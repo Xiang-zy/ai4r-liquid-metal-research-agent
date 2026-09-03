@@ -1,0 +1,11 @@
+[project]
+name = "ai4r-liquid-metal-research-agent"
+version = "5.3.0"
+description = "Liquid-metal research agent; publication snapshot with synthetic fixtures"
+requires-python = ">=3.10"
+dependencies = []
+license = "LicenseRef-LMLitAgent-NC-Reciprocal-1.0"
+license-files = ["LICENSE"]
+
+[tool.unittest]
+start-directory = "tests"
