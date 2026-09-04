@@ -9,12 +9,16 @@ import os
 import re
 import json
 import time
+import math
+import hashlib
+import statistics
 import urllib.request
 import urllib.error
 from datetime import datetime
 from collections import defaultdict
 
 from sciverse_client import SciverseClient
+from literature_data import _normalize_value, reference_material_key
 from optimizer import (
     CompositionPropertySurrogate,
     GeneticAlgorithm,
@@ -101,6 +105,7 @@ class LLMClient:
         self.mode = "api" if self.api_key else "template"
         self.call_count = 0
         self.failed_call_count = 0
+        self.request_attempt_count = 0
         self.total_tokens = 0
         self.last_error = None
         self.last_finish_reason = None
@@ -136,6 +141,7 @@ class LLMClient:
         self.last_error = None
         for attempt in range(self.max_retries + 1):
             try:
+                self.request_attempt_count += 1
                 with urllib.request.urlopen(req, timeout=90) as resp:
                     result = json.loads(resp.read().decode("utf-8"))
                     choice = result["choices"][0]
@@ -144,6 +150,10 @@ class LLMClient:
                     self.total_tokens += usage.get("total_tokens", 0)
                     self.call_count += 1
                     self.last_finish_reason = choice.get("finish_reason")
+                    if self.last_finish_reason == "length":
+                        raise ValueError("truncated completion")
+                    if not isinstance(content, str):
+                        raise ValueError("non-text completion")
                     content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL).strip()
                     if not content:
                         raise ValueError("模型响应在移除思考内容后为空")
@@ -154,8 +164,8 @@ class LLMClient:
                     time.sleep(2 ** attempt)
                     continue
                 break
-            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError) as exc:
-                self.last_error = f"{type(exc).__name__}: {exc}"
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                self.last_error = type(exc).__name__  # never print supplier payloads/credentials
                 if attempt < self.max_retries:
                     time.sleep(2 ** attempt)
                     continue
@@ -417,10 +427,13 @@ class KnowledgeExtractionAgent(BaseAgent):
             if full_text:
                 parts.append(f"[Full Text] {full_text}")
 
-        return "\n\n".join(parts)
+        text = "\n\n".join(parts)
+        paper["_evidence_text"] = text
+        return text
 
     def _extract_with_llm(self, paper, paper_text, second_pass=False):
         """使用 LLM 从论文文本中抽取结构化知识"""
+        paper["_evidence_text"] = paper_text
         if self.llm.mode != "api":
             return None
 
@@ -489,21 +502,29 @@ DOI: {paper.get('doi', 'Unknown')}
 
             # 标准化属性名
             normalized_props = []
+            if not isinstance(data, dict) or not isinstance(data.get("properties", []), list):
+                return None
             for prop in data.get("properties", []):
+                if not isinstance(prop, dict):
+                    continue
                 # 跳过value为null或None的属性
                 val = prop.get("value")
-                if val is None:
+                if val is None or isinstance(val, bool):
                     continue
                 if isinstance(val, str):
                     try:
                         val = float(val)
                     except ValueError:
                         continue
+                if not isinstance(val, (int, float)) or not math.isfinite(val):
+                    continue
 
+                if not isinstance(prop.get("property", ""), str):
+                    continue
                 normalized_name = normalize_property_name(prop.get("property", ""))
                 quote = str(prop.get("evidence_quote", "")).strip()
                 quote_verified = self._quote_in_text(quote, paper_text)
-                if not quote_verified:
+                if not quote_verified or not self._value_in_quote(val, quote):
                     continue
                 normalized_props.append({
                     "material": prop.get("material", "liquid metal"),
@@ -527,6 +548,7 @@ DOI: {paper.get('doi', 'Unknown')}
                 "year": paper.get("year", 0),
                 "doi": paper.get("doi", ""),
                 "source": self._source_record(paper),
+                "source_text": paper_text,
                 "domain_tags": self._infer_domain_tags(paper),
                 "materials_identified": data.get("materials_identified", []),
                 "properties": normalized_props,
@@ -546,53 +568,59 @@ DOI: {paper.get('doi', 'Unknown')}
         properties = []
         seen_keys = set()  # (property, value) 去重
         chunk = paper_text
+        paper["_evidence_text"] = paper_text
 
+        number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:\s*[xX×*]\s*10\s*\^?\s*[-+]?\d+|[eE][-+]?\d+)?"
         patterns = [
-            (r"(\d+\.?\d*)\s*[xX]?[\*]?\s*10\^?(\d+)?\s*S/m", "electrical conductivity", "S/m"),
-            (r"(\d+\.?\d*)\s*mN/m", "surface tension", "mN/m"),
-            (r"(\d+\.?\d*)\s*Pa\*?s", "viscosity", "Pa*s"),
-            (r"(-?\d+\.?\d*)(?:\s*°\s*C|\s+deg(?:ree)?\s*C|\s+C\b)", "melting point", "C"),
-            (r"(\d+\.?\d*)\s*g/cm3", "density", "g/cm3"),
-            (r"(\d+\.?\d*)\s*%", "max strain", "%"),
+            (rf"({number})\s*S/m\b", "electrical conductivity", "S/m"),
+            (rf"({number})\s*mN/m\b", "surface tension", "mN/m"),
+            (rf"({number})\s*Pa(?:\*|·)?s\b", "viscosity", "Pa*s"),
+            (rf"({number})(?:\s*°\s*C|\s+deg(?:ree)?\s*C|\s+C\b)", "temperature", "C"),
+            (rf"({number})\s*g/cm(?:3|³)", "density", "g/cm3"),
+            (rf"({number})\s*%", "percentage", "%"),
         ]
 
-        materials = set()
+        materials = []
         for mat_name in ["EGaIn", "Galinstan", "gallium", "liquid metal"]:
             if mat_name.lower() in chunk.lower():
-                materials.add(mat_name)
+                materials.append(mat_name)
         if not materials:
-            materials.add("liquid metal")
+            materials.append("liquid metal")
 
         for pattern, prop_name, unit in patterns:
             matches = re.finditer(pattern, chunk, flags=re.IGNORECASE)
             for match_obj in matches:
-                match = match_obj.groups() if match_obj.groups() else match_obj.group(0)
-                if isinstance(match, tuple):
-                    val = match[0]
-                    if len(match) > 1 and match[1]:
-                        try:
-                            val = float(match[0]) * (10 ** int(match[1]))
-                        except ValueError:
-                            continue
-                    else:
-                        try:
-                            val = float(match[0])
-                        except ValueError:
-                            continue
-                else:
-                    try:
-                        val = float(match)
-                    except ValueError:
+                try:
+                    val = self._parse_number(match_obj.group(1))
+                except (ValueError, OverflowError):
+                    continue
+                if not math.isfinite(val):
+                    continue
+                before = re.split(r"[.;!?\n]", chunk[max(0, match_obj.start()-100):match_obj.start()])[-1]
+                after = chunk[match_obj.end():match_obj.end()+30]
+                actual_name = prop_name
+                if prop_name == "temperature":
+                    if not re.search(r"melting\s*(?:point|temperature)|melts?\s*(?:at)?|熔点", before, re.I):
                         continue
+                    actual_name = "melting point"
+                if prop_name == "percentage":
+                    if not (re.search(r"(?:strain|stretchability)[^.;!?]{0,40}$", before, re.I)
+                            or re.match(r"\s*(?:tensile\s+)?strain\b", after, re.I)):
+                        continue
+                    actual_name = "max strain"
+                specific = [m for m in materials if m != "liquid metal"]
+                material = specific[0] if len(specific) == 1 else "liquid metal (identity ambiguous)"
+                if re.search(r"composite|elastomer|polymer|TPU|PDMS|sensor|oxide\s+skin", chunk, re.I):
+                    material += " composite/device (not bulk alloy)"
 
-                norm_prop = normalize_property_name(prop_name)
+                norm_prop = normalize_property_name(actual_name)
                 dedup_key = (norm_prop, val)
                 if dedup_key in seen_keys:
                     continue
                 seen_keys.add(dedup_key)
 
                 properties.append({
-                    "material": list(materials)[0] if materials else "liquid metal",
+                    "material": material,
                     "property": norm_prop,
                     "property_original": prop_name,
                     "value": val,
@@ -613,8 +641,9 @@ DOI: {paper.get('doi', 'Unknown')}
             "year": paper.get("year", 0),
             "doi": paper.get("doi", ""),
             "source": self._source_record(paper),
+            "source_text": paper_text,
             "domain_tags": self._infer_domain_tags(paper),
-            "materials_identified": list(materials),
+            "materials_identified": materials,
             "properties": properties[:8],
             "methods_summary": paper.get("abstract", "")[:300],
             "key_findings": paper.get("chunk", "")[:300],
@@ -626,6 +655,23 @@ DOI: {paper.get('doi', 'Unknown')}
             "extraction_method": "regex fallback (LLM unavailable)",
             "extraction_mode": "regex_fallback",
         }
+
+    @staticmethod
+    def _parse_number(value):
+        compact = re.sub(r"\s+", "", value)
+        compact = re.sub(r"[xX×*]10\^?", "e", compact)
+        return float(compact)
+
+    @classmethod
+    def _value_in_quote(cls, value, quote):
+        pattern = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:\s*[xX×*]\s*10\s*\^?\s*[-+]?\d+|[eE][-+]?\d+)?"
+        for match in re.finditer(pattern, quote):
+            try:
+                if math.isclose(value, cls._parse_number(match.group()), rel_tol=1e-9, abs_tol=1e-12):
+                    return True
+            except (ValueError, OverflowError):
+                pass
+        return False
 
     @staticmethod
     def _quote_in_text(quote, text):
@@ -643,14 +689,22 @@ DOI: {paper.get('doi', 'Unknown')}
             "chunk_id": paper.get("chunk_id", ""),
             "page_no": paper.get("page_no"),
             "title": paper.get("title", ""),
+            "data_origin": paper.get("data_origin", "retrieved_unverified"),
+            "source_text_sha256": hashlib.sha256(paper.get("_evidence_text", "").encode()).hexdigest(),
         }
 
     def _evidence_record(self, paper, quote, quote_verified, locator):
+        text = paper.get("_evidence_text", "")
+        normalized = lambda value: re.sub(r"\s+", " ", value).strip().casefold()
+        offset = normalized(text).find(normalized(quote)) if quote else -1
         return {
             **self._source_record(paper),
             "quote": quote,
-            "quote_verified": bool(quote_verified),
-            "locator": str(locator or ""),
+            "quote_verified": bool(quote_verified and offset >= 0),
+            "page_no": None,  # a retrieval-hit page cannot locate quotes from appended full text
+            "locator": f"gathered_text:normalized_char-{offset}" if offset >= 0 else "",
+            "reported_section": str(locator or ""),
+            "verification_scope": "substring_in_saved_source_text_only",
         }
 
     def _infer_domain_tags(self, paper):
@@ -699,16 +753,33 @@ class KnowledgeFusionAgent(BaseAgent):
 
         fusion_results = []
         for prop_name, entries in property_groups.items():
-            materials = list(set(e["material"] for e in entries))
-            values = [e["value"] for e in entries if isinstance(e["value"], (int, float))]
-            conditions = list(set(e.get("conditions", "unknown") for e in entries))
-            papers = list(set(e["paper_id"] for e in entries))
+            materials = sorted(set(e["material"] for e in entries))
+            conditions = sorted(set(e.get("conditions", "unknown") for e in entries))
+            papers = sorted(set(e["paper_id"] for e in entries))
+            units = set()
+            values = []
+            for entry in entries:
+                raw = entry.get("value")
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+                    continue
+                value, unit = _normalize_value(prop_name, raw, entry.get("unit"))
+                if value is None:
+                    value, unit = raw, entry.get("unit", "")
+                entry["normalized_value"], entry["normalized_unit"] = value, unit
+                values.append(value)
+                units.add(unit)
+            comparable = (len(materials) == 1 and len(conditions) == 1 and len(units) == 1
+                          and bool(next(iter(units), "")) and bool(conditions[0])
+                          and conditions[0] not in {"unknown", "from text"})
 
-            if len(values) > 1:
+            if not comparable:
+                val_range, cv, consistency = "Not pooled: incompatible or missing metadata", None, "not_comparable"
+            elif len(values) > 1:
                 val_range = f"[{min(values)}, {max(values)}]"
                 val_mean = sum(values) / len(values)
-                cv = (max(values) - min(values)) / abs(val_mean) * 100 if val_mean != 0 else 0
-                consistency = "high" if cv < 20 else ("medium" if cv < 50 else "low")
+                denominator = abs(val_mean + 273.15) if prop_name == "melting point" else abs(val_mean)
+                cv = statistics.pstdev(values) / denominator * 100 if denominator else None
+                consistency = "n/a" if cv is None else ("high" if cv < 20 else ("medium" if cv < 50 else "low"))
             elif values:
                 val_range = str(values[0])
                 cv = 0
@@ -719,6 +790,10 @@ class KnowledgeFusionAgent(BaseAgent):
                 consistency = "n/a"
 
             conflicts = []
+            if len(units) > 1:
+                conflicts.append("单位无法统一，不合并数值")
+            if not comparable:
+                conflicts.append("材料、单位或测试条件不足以支持直接数值比较")
             if len(materials) > 1:
                 conflicts.append(f"不同材料体系: {', '.join(materials)}")
             if len(conditions) > 1 and prop_name in ["electrical conductivity", "surface tension", "viscosity"]:
@@ -733,7 +808,9 @@ class KnowledgeFusionAgent(BaseAgent):
                 "value_range": val_range,
                 "conditions": conditions,
                 "consistency": consistency,
-                "variation_coefficient": round(cv, 1),
+                "variation_coefficient": round(cv, 1) if cv is not None else None,
+                "variation_definition": "population_std / absolute_mean * 100; temperature uses Kelvin",
+                "comparison_scope": "recorded_metadata_only; conditions_not_independently_verified",
                 "conflicts": conflicts,
                 "data_gap": self._identify_data_gap(prop_name, entries),
             })
@@ -750,9 +827,9 @@ class KnowledgeFusionAgent(BaseAgent):
     def _identify_data_gap(self, prop_name, entries):
         gaps = []
         conditions = [e.get("conditions", "").lower() for e in entries]
-        has_temp_data = any("c" in c or "temperature" in c for c in conditions)
+        has_temp_data = any(re.search(r"\d\s*(?:°\s*C|degC|K\b)|temperature", c, re.I) for c in conditions)
         if not has_temp_data and prop_name in ["electrical conductivity", "surface tension", "viscosity"]:
-            gaps.append("缺少温度依赖性数据")
+            gaps.append("未记录明确温度条件；不能据此断言整篇文献缺少温度依赖性研究")
         if len(entries) == 1:
             gaps.append("仅单一文献报道, 需要交叉验证")
         return gaps
@@ -777,10 +854,17 @@ class GapIdentificationAgent(BaseAgent):
             llm_gaps = self._identify_with_llm(fusion_results, knowledge_cards)
             if llm_gaps:
                 self.log(f"LLM 识别出 {len(llm_gaps)} 个 Research Gap")
-                return llm_gaps
+                return self._finalize_gaps(llm_gaps)
             self.log("LLM 识别失败, 回退到规则模式")
 
-        return self._identify_with_rules(fusion_results, knowledge_cards)
+        return self._finalize_gaps(self._identify_with_rules(fusion_results, knowledge_cards))
+
+    @staticmethod
+    def _finalize_gaps(gaps):
+        for gap in gaps:
+            gap.setdefault("description", "当前抽取材料提示的待核验问题；不证明整个研究领域存在该空白。")
+            gap["claim_level"] = "unverified_research_question"
+        return gaps
 
     def _identify_with_llm(self, fusion_results, knowledge_cards):
         fusion_summary = []
@@ -895,8 +979,8 @@ class GapIdentificationAgent(BaseAgent):
         if temp_evidence or temp_props:
             gaps.append({
                 "id": "GAP-001",
-                "title": "液态金属关键物性的温度依赖性数据系统性缺失",
-                "description": "现有文献主要在室温条件下表征液态金属核心物性, 缺乏系统性温度扫描数据。",
+                "title": "当前条目的温度条件及覆盖范围待核验",
+                "description": "当前抽取条目未记录足够温度条件；需要回溯原文，不能据此断言文献或领域缺少温度扫描研究。",
                 "gap_type": "数据空白",
                 "severity": "high",
                 "affected_properties": ["electrical conductivity", "surface tension", "viscosity"],
@@ -916,7 +1000,8 @@ class GapIdentificationAgent(BaseAgent):
                             break
             gaps.append({
                 "id": "GAP-002",
-                "title": "液态金属物性测试条件缺乏标准化",
+                "title": "跨条目材料与测试条件的可比性待核验",
+                "description": "当前记录含不同材料、单位或不完整测试条件，暂不合并；这不是已证实的领域方法论缺陷。",
                 "gap_type": "方法论缺陷",
                 "severity": "high",
                 "affected_properties": [f["property"] for f in cond_props],
@@ -988,16 +1073,25 @@ class EvidenceVerificationAgent(BaseAgent):
         self.log(f"核验 {len(gaps)} 个 Research Gap 的证据链...")
 
         verified = []
+        cards_by_id = {c["paper_id"]: c for c in knowledge_cards}
         for gap in gaps:
             evidence = gap.get("evidence", [])
-            source_papers = list(set(e.get("paper_id", "") for e in evidence if e.get("paper_id")))
+            source_papers = []
             traceable = []
             for item in evidence:
-                has_quote = bool(str(item.get("quote", "")).strip())
-                has_locator = bool(item.get("doi")) or bool(
-                    item.get("doc_id") and (item.get("page_no") is not None or item.get("locator"))
-                )
-                traceable.append(has_quote and item.get("quote_verified") is True and has_locator)
+                card = cards_by_id.get(item.get("paper_id"), {})
+                source = card.get("source", {})
+                doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", str(source.get("doi") or card.get("doi") or "").strip().lower())
+                identity = doi or source.get("doc_id", "")
+                quote = str(item.get("quote", "")).strip()
+                approved = [p.get("evidence", {}) for p in card.get("properties", [])]
+                approved = [e for e in approved if isinstance(e, dict)]
+                valid = bool(identity and quote and source.get("data_origin") not in {"synthetic_test_fixture", "historical_demo_fixture"}
+                             and KnowledgeExtractionAgent._quote_in_text(quote, card.get("source_text", ""))
+                             and any(e.get("quote_verified") is True and e.get("quote") == quote and e.get("locator") for e in approved))
+                traceable.append(valid)
+                if valid and identity not in source_papers:
+                    source_papers.append(identity)
 
             verification = {
                 "gap_id": gap["id"],
@@ -1007,6 +1101,7 @@ class EvidenceVerificationAgent(BaseAgent):
                 "traceable_evidence_count": sum(traceable),
                 "verification_status": "weak",
                 "issues": [],
+                "verification_scope": "local_evidence_traceability_only; not_gap_novelty_or_scientific_validation",
             }
 
             if len(evidence) < 2:
@@ -1021,7 +1116,7 @@ class EvidenceVerificationAgent(BaseAgent):
 
             if len(evidence) >= 2 and len(source_papers) >= 2 and all(traceable):
                 verification["verification_status"] = "verified"
-            elif len(evidence) >= 2 and len(source_papers) >= 2:
+            elif any(traceable):
                 verification["verification_status"] = "verified_with_notes"
 
             verified.append(verification)
@@ -1466,8 +1561,8 @@ class ReportGenerationAgent(BaseAgent):
             "knowledge_statistics": {
                 "total_cards": len(knowledge_cards),
                 "total_properties": sum(len(c["properties"]) for c in knowledge_cards),
-                "unique_materials": list(set(m for c in knowledge_cards for m in c.get("materials_identified", []))),
-                "domain_coverage": list(set(tag for c in knowledge_cards for tag in c.get("domain_tags", []))),
+                "unique_materials": sorted(set(m for c in knowledge_cards for m in c.get("materials_identified", []))),
+                "domain_coverage": sorted(set(tag for c in knowledge_cards for tag in c.get("domain_tags", []))),
             },
             "fusion_summary": {
                 "total_property_categories": len(fusion_results),
@@ -1510,13 +1605,13 @@ class ReportGenerationAgent(BaseAgent):
 - 入选文献数: {paper_count}
 - 抽取属性数: {total_props}
 - 识别Gap数: {len(gaps)} (其中 {len(high_severity)} 个高优先级)
-- 通过严格证据核验的Gap数: {verified_gap_count}
+- 满足本地原文可追溯条件的Gap数: {verified_gap_count}（不代表科学验证或新颖性）
 {route_a_summary}
 
 Gap列表:
 {json.dumps([{"title": g["title"], "severity": g["severity"]} for g in gaps], ensure_ascii=False, indent=2)}
 
-要求: 仅总结有可追溯证据的结果；未通过证据核验的Gap必须明确称为候选假设。不要使用标题或列表, 只写一段话。"""
+要求: 所有Gap仅为候选研究问题，原文可追溯不代表领域空白或新颖性已经验证。不得把抽取字段缺失称为整个研究领域缺失。不要使用标题或列表, 只写一段话。"""
 
             result = self.llm.chat(prompt, system_prompt="你是材料科学研究报告撰写专家。", temperature=0.4, max_tokens=500)
             if result:
@@ -1525,6 +1620,6 @@ Gap列表:
         mode_text = "在线检索" if self.llm.mode == "api" else "离线演示语料"
         return (
             f"本次运行基于{mode_text}筛选 {paper_count} 篇文献，得到 {total_props} 条带原文短句的结构化属性。"
-            f"系统提出 {len(gaps)} 个 Research Gap 候选，其中 {verified_gap_count} 个满足多来源、原文短句和定位信息的严格核验条件。"
+            f"系统提出 {len(gaps)} 个 Research Gap 候选，其中 {verified_gap_count} 个满足多来源、原文短句和定位信息的本地可追溯条件（非科学或新颖性验证）。"
             "未通过核验的候选仅用于提示后续检索方向，不应作为已证实结论；组成优化结果来自整理参考锚点上的代理模型，仍需实验验证。"
         )

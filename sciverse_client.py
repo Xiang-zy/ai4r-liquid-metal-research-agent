@@ -26,11 +26,14 @@ class SciverseClient:
         self.call_count = 0
         self.cache_hits = 0
         self.request_attempt_count = 0
+        self.failed_call_count = 0
+        self.last_error = None
         self.min_interval_seconds = float(os.environ.get("SCIVERSE_MIN_INTERVAL_SECONDS", "2.0"))
         self._last_request_started = 0.0
         default_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "sciverse")
         self.cache_dir = os.path.abspath(cache_dir or os.environ.get("SCIVERSE_CACHE_DIR", default_cache))
         self.cache_enabled = True
+        self._cache_scope = hashlib.sha256((self.base_url + "\0" + api_key).encode()).hexdigest()
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
         except OSError:
@@ -110,6 +113,8 @@ class SciverseClient:
             next_offset = result.get("next_offset")
             if result.get("more") is False or next_offset is None:
                 break
+            if not isinstance(next_offset, int) or isinstance(next_offset, bool) or next_offset <= offset:
+                break
             offset = next_offset
             time.sleep(0.2)
         return all_content
@@ -132,7 +137,7 @@ class SciverseClient:
         url = self.base_url + path
         cache_path = self._cache_path(method, path, data)
         cached = self._read_cache(cache_path) if self.cache_enabled else None
-        if cached is not None:
+        if isinstance(cached, dict):
             self.cache_hits += 1
             return cached
         for attempt in range(self.max_retries + 1):
@@ -143,24 +148,30 @@ class SciverseClient:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     self.call_count += 1
                     result = json.loads(resp.read().decode("utf-8"))
+                    if not isinstance(result, dict):
+                        raise ValueError("non-object response")
+                    self.last_error = None
                     if self.cache_enabled:
                         self._write_cache(cache_path, result)
                     return result
             except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
                 retryable = e.code in {429, 500, 502, 503, 504}
                 if retryable and attempt < self.max_retries:
                     retry_after = e.headers.get("Retry-After")
                     delay = float(retry_after) if retry_after and retry_after.isdigit() else 2 ** attempt
                     time.sleep(delay + random.random() * 0.25)
                     continue
-                print(f"  [Sciverse] HTTP {e.code}: {body[:200]}")
+                self.failed_call_count += 1
+                self.last_error = f"HTTP {e.code}"
+                print(f"  [Sciverse] {self.last_error}; response body omitted")
                 return {}
-            except (urllib.error.URLError, TimeoutError) as e:
+            except (urllib.error.URLError, TimeoutError, ValueError, TypeError) as e:
                 if attempt < self.max_retries:
                     time.sleep(2 ** attempt + random.random() * 0.25)
                     continue
-                print(f"  [Sciverse] 请求失败: {e}")
+                self.failed_call_count += 1
+                self.last_error = type(e).__name__
+                print(f"  [Sciverse] 请求失败: {self.last_error}; details omitted")
                 return {}
         return {}
 
@@ -171,7 +182,7 @@ class SciverseClient:
         self._last_request_started = time.monotonic()
 
     def _cache_path(self, method, path, data):
-        digest = hashlib.sha256(method.encode("utf-8") + b"\0" + path.encode("utf-8") + b"\0" + (data or b"")).hexdigest()
+        digest = hashlib.sha256(self._cache_scope.encode() + b"\0" + method.encode("utf-8") + b"\0" + path.encode("utf-8") + b"\0" + (data or b"")).hexdigest()
         return os.path.join(self.cache_dir, f"{digest}.json")
 
     @staticmethod

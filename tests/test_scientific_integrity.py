@@ -102,7 +102,7 @@ class EvidenceVerificationTests(unittest.TestCase):
             "The device survived 3000 cycles and was tested at 25 °C.",
         )
         temperatures = [p["value"] for p in card["properties"] if p["property"] == "melting point"]
-        self.assertEqual(temperatures, [25.0])
+        self.assertEqual(temperatures, [])  # test temperature is not a melting point
 
     def test_untraceable_evidence_is_not_verified(self):
         verifier = EvidenceVerificationAgent(LLMClient())
@@ -112,7 +112,7 @@ class EvidenceVerificationTests(unittest.TestCase):
                 {"paper_id": "P2", "quote": "b", "quote_verified": False},
             ],
         }], [])
-        self.assertEqual(result[0]["verification_status"], "verified_with_notes")
+        self.assertEqual(result[0]["verification_status"], "weak")
         self.assertEqual(result[0]["traceable_evidence_count"], 0)
 
 

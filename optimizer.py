@@ -31,7 +31,7 @@ class CompositionPropertySurrogate:
     """
     基于整理参考锚点的插值代理模型 (v3.1)
     使用待原始来源复核的参考锚点 + 距离反比加权插值。
-    数据来源: CRC Handbook, Dickey 2013, Liu 2014, Gallindo 2002, Assael 2012 等7篇独立文献
+    书目来源组尚未逐项核验，也未证明彼此独立；不得称为已验证实测数据库。
     """
 
     def __init__(self, knowledge_cards=None, include_extracted_anchors=False, anchors=None):
@@ -79,7 +79,7 @@ class CompositionPropertySurrogate:
                 "label": a.get("label", "?"),
                 "reference": a.get("reference", "?"),
                 "ref_code": a.get("ref_code", "?"),
-                "data_type": a.get("data_type", "measured"),
+                "data_type": a.get("data_type", "curated_unverified"),
                 "verification_status": a.get("verification_status", "pending_primary_source_audit"),
             }
             for a in self._literature_anchors
@@ -407,7 +407,7 @@ class BayesianOptimizer:
             K[i][i] += noise
         K_s = [self._rbf_kernel(x, self.gp_X[i]) for i in range(n)]
         try:
-            alpha = self._solve_linear(K, K_s)
+            alpha = self._solve_linear(K, self.gp_y)
             mean = sum(K_s[i] * alpha[i] for i in range(n))
             K_ss = self._rbf_kernel(x, x) + noise
             v = self._solve_linear(K, K_s)
@@ -417,6 +417,8 @@ class BayesianOptimizer:
             mean = sum(self.gp_y) / len(self.gp_y) if self.gp_y else 0.5
             variance = 1.0
         return mean, variance
+
+
 
     def _solve_linear(self, A, b):
         n = len(A)
@@ -1234,14 +1236,15 @@ def _run_reference_snapshot_validation(knowledge_cards, surrogate):
         "limitations": "仅用于发现明显单位或抽取异常；所有锚点仍需回到原始来源逐项核验。",
         "validation_details": cv_results,
         "surrogate_anchors": len(surrogate._anchors),
-        "anchor_sources": list(set(a.get("ref_code", "?") for a in surrogate._anchors)),
+        "anchor_sources": sorted(set(a.get("ref_code", "?") for a in surrogate._anchors)),
     }
 
     print(f"  验证属性数: {total}")
-    print(f"  匹配 (<5%偏差): {matches}")
-    print(f"  接近 (5-15%偏差): {close}")
-    print(f"  不匹配 (>15%偏差): {mismatches}")
+    print(f"  匹配（按属性容差）: {matches}")
+    print(f"  接近（按属性容差）: {close}")
+    print(f"  不匹配（按属性容差）: {mismatches}")
+    print("  熔点: 绝对差<1°C/<5°C；其他属性: 偏差<5%/<15%，仅作示意检查")
     print(f"  平均偏差: {avg_deviation:.2f}%")
-    print(f"  代理模型锚点数: {len(surrogate._anchors)} (来自 {len(summary['anchor_sources'])} 篇独立文献)")
+    print(f"  代理模型锚点数: {len(surrogate._anchors)} (按 {len(summary['anchor_sources'])} 组待核验书目分组，未证明独立性)")
 
     return summary

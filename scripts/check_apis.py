@@ -9,6 +9,9 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def load_env(path):
@@ -34,11 +37,21 @@ def request_json(request, timeout):
         return json.loads(response.read().decode("utf-8"))
 
 
-def minimax_check():
+def minimax_check(generate=False):
     key = os.environ.get("MINIMAX_API_KEY")
     if not key:
         print("MiniMax: SKIP (MINIMAX_API_KEY is missing)")
         return False
+    if generate:
+        from agents import LLMClient
+        client = LLMClient()
+        client.max_retries = 0
+        reply = client.chat("Reply with OK only. This is an API connectivity test.", max_tokens=2048)
+        if not reply:
+            print(f"MiniMax: FAIL (generation; error={client.last_error})")
+            return False
+        print(f"MiniMax: OK (real generation, model={client.model}, tokens={client.total_tokens}; response omitted)")
+        return True
 
     chat_url = os.environ.get(
         "MINIMAX_BASE_URL",
@@ -85,6 +98,7 @@ def sciverse_check():
     doc_id = next((hit.get("doc_id") for hit in hits if hit.get("doc_id")), None)
     if doc_id:
         from urllib.parse import urlencode
+        time.sleep(2.0)
 
         content_request = urllib.request.Request(
             base_url + "/content?" + urlencode({"doc_id": doc_id, "offset": 0, "limit": 1}),
@@ -103,11 +117,12 @@ def sciverse_check():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", type=Path, default=Path(__file__).resolve().parents[1] / ".env")
+    parser.add_argument("--generate", action="store_true", help="Make one real MiniMax completion, consuming account quota")
     args = parser.parse_args()
     load_env(args.env_file)
 
     checks = []
-    for name, function in (("MiniMax", minimax_check), ("Sciverse", sciverse_check)):
+    for name, function in (("MiniMax", lambda: minimax_check(args.generate)), ("Sciverse", sciverse_check)):
         try:
             checks.append(function())
         except urllib.error.HTTPError as error:

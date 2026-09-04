@@ -19,6 +19,9 @@ Ga-In-Sn 液态金属体系整理参考锚点 (v3.1)
   [Chieco] Chieco, C. et al., J. Phys. Chem. Ref. Data 51, 013104, 2022
 """
 
+import math
+import re
+
 # 整理参考锚点（每条带有二手书目信息，尚待原始来源逐项复核）
 LITERATURE_DATA_POINTS = [
     # === 纯元素 (CRC Handbook) ===
@@ -304,7 +307,7 @@ REFERENCE_SNAPSHOT_VALUES = {
 
 def _normalize_value(property_name, value, unit):
     """将可识别单位转换到参考快照单位；不猜测缺失或歧义单位。"""
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None, None
     raw_unit = str(unit or "").strip().replace("³", "3").replace("°", "")
     compact = raw_unit.replace(" ", "")
@@ -326,6 +329,18 @@ def _normalize_value(property_name, value, unit):
     return None, None
 
 
+def reference_material_key(material):
+    """Match only unambiguous bulk-material aliases, never infer alloy ratios."""
+    name = re.sub(r"\s+", " ", str(material or "").strip().casefold())
+    return {
+        "egain": "EGaIn", "eutectic gallium-indium": "EGaIn",
+        "galinstan": "Galinstan",
+        "ga": "Pure_Ga", "pure ga": "Pure_Ga", "gallium": "Pure_Ga",
+        "in": "Pure_In", "pure in": "Pure_In", "indium": "Pure_In",
+        "sn": "Pure_Sn", "pure sn": "Pure_Sn", "tin": "Pure_Sn",
+    }.get(name)
+
+
 def cross_validate_against_reference_snapshot(extracted_properties):
     """
     将抽取值与代码内冻结参考快照比较（不进行实时数据库查询）。
@@ -339,22 +354,11 @@ def cross_validate_against_reference_snapshot(extracted_properties):
     results = []
 
     for prop in extracted_properties:
-        material = prop.get("material", "").lower()
         pname = prop.get("property", "")
-        value = prop.get("value", 0)
+        value = prop.get("value")
 
         # Match material to database entry
-        db_key = None
-        if "egain" in material or ("ga" in material and "in" in material and "sn" not in material):
-            db_key = "EGaIn"
-        elif "galinstan" in material or ("ga" in material and "in" in material and "sn" in material):
-            db_key = "Galinstan"
-        elif material == "gallium" or material == "pure ga" or material == "ga":
-            db_key = "Pure_Ga"
-        elif material == "indium" or material == "pure in" or material == "in":
-            db_key = "Pure_In"
-        elif material == "tin" or material == "pure sn" or material == "sn":
-            db_key = "Pure_Sn"
+        db_key = reference_material_key(prop.get("material"))
 
         if not db_key or db_key not in REFERENCE_SNAPSHOT_VALUES:
             continue
@@ -374,8 +378,14 @@ def cross_validate_against_reference_snapshot(extracted_properties):
         if db_value is None or normalized_value is None or db_value == 0:
             continue
 
-        deviation = abs(normalized_value - db_value) / abs(db_value) * 100
-        status = "match" if deviation < 5 else ("close" if deviation < 15 else "mismatch")
+        difference = abs(normalized_value - db_value)
+        # Celsius has an arbitrary zero: percentages must use absolute temperature.
+        denominator = db_value + 273.15 if pname == "melting point" else abs(db_value)
+        deviation = difference / denominator * 100
+        if pname == "melting point":
+            status = "match" if difference < 1 else ("close" if difference < 5 else "mismatch")
+        else:
+            status = "match" if deviation < 5 else ("close" if deviation < 15 else "mismatch")
 
         results.append({
             "material": prop.get("material", ""),
@@ -385,6 +395,11 @@ def cross_validate_against_reference_snapshot(extracted_properties):
             "normalized_value": round(normalized_value, 8),
             "normalized_unit": normalized_unit,
             "reference_value": db_value,
+            "reference_material": db_key,
+            "absolute_difference": round(difference, 8),
+            "deviation_basis": "absolute_temperature_K" if pname == "melting point" else "reference_magnitude",
+            "comparison_scope": "illustrative_snapshot_check; test_conditions_not_independently_matched",
+            "tolerance_rule": "absolute_difference_C: <1 match, <5 close" if pname == "melting point" else "relative_percent: <5 match, <15 close",
             "reference_source": db.get("source", ""),
             "reference_source_id": db.get("source_id", ""),
             "deviation_pct": round(deviation, 2),
@@ -413,7 +428,8 @@ def get_anchor_list():
             "label": dp["label"],
             "reference": dp["reference"],
             "ref_code": dp["ref_code"],
-            "data_type": dp["data_type"],
+            "data_type": "curated_unverified",
+            "reported_data_type": dp["data_type"],
             "verification_status": "pending_primary_source_audit",
         }
         for dp in LITERATURE_DATA_POINTS

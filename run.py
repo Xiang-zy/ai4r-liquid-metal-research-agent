@@ -22,6 +22,8 @@ import platform
 import sys
 import time
 import math
+import hashlib
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
@@ -51,6 +53,10 @@ from optimizer import CompositionPropertySurrogate, run_ablation_study
 
 class Pipeline:
     def __init__(self, offline=False, strict=False, target_paper_count=50):
+        if offline and strict:
+            raise ValueError("--offline and --strict are mutually exclusive")
+        if target_paper_count < 1:
+            raise ValueError("target_paper_count must be positive")
         self.offline = offline
         self.strict = strict
         self.target_paper_count = target_paper_count
@@ -63,6 +69,8 @@ class Pipeline:
         sciverse_key = None if offline else os.environ.get("SCIVERSE_API_KEY")
         if sciverse_key:
             self.sciverse = SciverseClient(sciverse_key)
+        if strict and (self.llm.mode != "api" or self.sciverse is None):
+            raise RuntimeError("严格在线模式要求同时配置MiniMax及Sciverse凭据")
 
         self.agents = {
             "planner": TaskPlannerAgent(self.llm),
@@ -131,6 +139,7 @@ class Pipeline:
                     "abstract": p["abstract"],
                     "chunk": p["abstract"],
                     "primary_topic": "",
+                    "data_origin": p.get("data_type", "historical_demo_fixture"),
                 })
 
         # Step 3: 文献筛选
@@ -188,10 +197,11 @@ class Pipeline:
         self.total_time = time.time() - pipeline_start
         total_props = sum(len(c['properties']) for c in knowledge_cards)
         fallback_cards = sum(c.get("extraction_mode") != "llm" for c in knowledge_cards)
-        if fallback_cards and not self.offline:
+        service_failures = self.llm.failed_call_count + (self.sciverse.failed_call_count if self.sciverse else 0)
+        if (fallback_cards or service_failures) and not self.offline:
             self.run_mode = "mixed_fallback"
-        if self.strict and fallback_cards and not self.offline:
-            raise RuntimeError(f"严格模式下有 {fallback_cards} 张知识卡片回退到非LLM抽取")
+        if self.strict and (fallback_cards or service_failures):
+            raise RuntimeError(f"严格模式失败: {fallback_cards}张回退知识卡片, {service_failures}次服务失败")
         route_a_rels = len(route_a_result.get("relationships", [])) if route_a_result else 0
 
         print("=" * 70)
@@ -221,11 +231,14 @@ class Pipeline:
                 "llm_model": self.llm.model,
                 "llm_calls": self.llm.call_count,
                 "llm_failed_calls": self.llm.failed_call_count,
+                "llm_request_attempts": self.llm.request_attempt_count,
                 "llm_last_finish_reason": self.llm.last_finish_reason,
                 "llm_last_error": self.llm.last_error,
                 "llm_tokens": self.llm.total_tokens,
                 "sciverse_connected": self.sciverse is not None,
                 "sciverse_calls": self.sciverse.call_count if self.sciverse else 0,
+                "sciverse_failed_calls": self.sciverse.failed_call_count if self.sciverse else 0,
+                "sciverse_request_attempts": self.sciverse.request_attempt_count if self.sciverse else 0,
                 "sciverse_cache_hits": self.sciverse.cache_hits if self.sciverse else 0,
                 "run_mode": self.run_mode,
                 "fallback_cards": fallback_cards,
@@ -244,6 +257,17 @@ class Pipeline:
 
 def generate_html_report(results, output_path):
     """生成专业的 HTML 调研报告 (v5.3 ERCPD版)"""
+    def escaped(value):
+        if isinstance(value, str):
+            return html_lib.escape(value, quote=True)
+        if isinstance(value, dict):
+            return {k: escaped(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [escaped(v) for v in value]
+        return value
+
+    # Report interpolation handles text, never trusted HTML from a paper or LLM.
+    results = escaped(results)
 
     scope = results["scope"]
     filter_result = results["filter_result"]
@@ -438,7 +462,7 @@ def generate_html_report(results, output_path):
     html_parts.append(f'    <div class="stat-card"><div class="num">{total_props}</div><div class="label">抽取属性条目</div></div>\n')
     html_parts.append(f'    <div class="stat-card"><div class="num">{len(fusion)}</div><div class="label">融合属性类别</div></div>\n')
     html_parts.append(f'    <div class="stat-card"><div class="num">{len(gaps)}</div><div class="label">Research Gaps</div></div>\n')
-    html_parts.append(f'    <div class="stat-card"><div class="num">{verified_count}</div><div class="label">已验证Gap</div></div>\n')
+    html_parts.append(f'    <div class="stat-card"><div class="num">{verified_count}</div><div class="label">证据可追溯Gap（非科学验证）</div></div>\n')
     html_parts.append(f'    <div class="stat-card route-a"><div class="num">{route_a_rels}</div><div class="label">构效关系</div></div>\n')
     html_parts.append(f'    <div class="stat-card"><div class="num">{stats["total_time"]}s</div><div class="label">总执行耗时</div></div>\n')
     html_parts.append("""  </div>
@@ -607,7 +631,7 @@ def generate_html_report(results, output_path):
   <div class="gap-card {sev_class}">
     <div class="gap-id">{gap["id"]} &nbsp; {gap_type_badge} &nbsp; {sev_badge}</div>
     <div class="gap-title">{gap["title"]}</div>
-    <div class="gap-desc">{gap["description"]}</div>
+    <div class="gap-desc">{gap.get("description", "待核验的候选问题")}</div>
     <div class="gap-evidence">
       <strong>证据链 ({len(gap.get("evidence", []))} 条):</strong>
       <ul>
@@ -639,8 +663,8 @@ def generate_html_report(results, output_path):
             "weak": "verify-weak",
         }.get(v["verification_status"], "verify-with_notes")
         status_text = {
-            "verified": "已验证",
-            "verified_with_notes": "已验证(有备注)",
+            "verified": "证据可追溯（非科学验证）",
+            "verified_with_notes": "部分可追溯（待核验）",
             "weak": "证据不足",
         }.get(v["verification_status"], v["verification_status"])
         issues = "; ".join(v.get("issues", [])) if v.get("issues") else "-"
@@ -985,20 +1009,21 @@ def generate_html_report(results, output_path):
   <p style="font-size:13px;color:#555;margin-bottom:12px;">
     将抽取值与代码内冻结参考快照进行单位归一化后比较；本步骤没有实时查询外部数据库，也不等同于原始来源核验。
     代理模型锚点: <strong>{cv_data.get('surrogate_anchors', 0)}个</strong>,
-    来自 <strong>{len(cv_data.get('anchor_sources', []))}篇</strong>独立文献。
+    按 <strong>{len(cv_data.get('anchor_sources', []))}组</strong>待核验书目分组（未证明独立性）。
   </p>
   <div style="background:#e3f2fd;border-radius:6px;padding:10px 15px;margin:10px 0;">
     <strong>验证汇总:</strong>
     验证属性数: {cv_data.get('total_properties_validated', 0)} |
-    匹配(&lt;5%偏差): <span style="color:#2e7d32;font-weight:bold;">{cv_data.get('matches', 0)}</span> |
-    接近(5-15%偏差): <span style="color:#f57f17;font-weight:bold;">{cv_data.get('close_matches', 0)}</span> |
-    不匹配(&gt;15%偏差): <span style="color:#c62828;font-weight:bold;">{cv_data.get('mismatches', 0)}</span> |
+    匹配（见属性容差）: <span style="color:#2e7d32;font-weight:bold;">{cv_data.get('matches', 0)}</span> |
+    接近（见属性容差）: <span style="color:#f57f17;font-weight:bold;">{cv_data.get('close_matches', 0)}</span> |
+    不匹配（见属性容差）: <span style="color:#c62828;font-weight:bold;">{cv_data.get('mismatches', 0)}</span> |
     匹配率: <strong>{cv_data.get('match_rate_pct', 0)}%</strong> |
     平均偏差: <strong>{cv_data.get('average_deviation_pct', 0)}%</strong>
   </div>
 """)
 
         if cv_details:
+            html_parts.append('<p>熔点按绝对差&lt;1°C / &lt;5°C分级，百分比仅用开尔文参考值；其他属性按5% / 15%分级。均为示意容差，不是实验误差或准确率。</p>')
             html_parts.append("""
   <table style="width:100%;border-collapse:collapse;font-size:12px;margin:10px 0;">
     <tr style="background:#1a237e;color:white;">
@@ -1552,12 +1577,28 @@ def main(argv=None):
     if args.max_papers < 1:
         parser.error("--max-papers 必须大于0")
     project_dir = os.path.dirname(os.path.abspath(__file__))
-    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if args.offline and args.strict:
+        parser.error("--offline 与 --strict 不能同时使用")
+    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     output_dir = os.path.abspath(args.output_dir or os.path.join(project_dir, "outputs", f"run-{run_stamp}"))
+    if os.path.isdir(output_dir) and os.listdir(output_dir):
+        # Logged runners may pre-create only their own metadata, not previous results.
+        allowed = {"input_config.json", "execution.jsonl"}
+        if set(os.listdir(output_dir)) - allowed:
+            parser.error("输出目录非空；请指定新的目录，避免覆盖已有结果")
     os.makedirs(output_dir, exist_ok=True)
 
     pipeline = Pipeline(offline=args.offline, strict=args.strict, target_paper_count=args.max_papers)
-    results = pipeline.run(args.query)
+    try:
+        results = pipeline.run(args.query)
+    except Exception as exc:
+        _write_json_atomic(os.path.join(output_dir, "failure_manifest.json"), {
+            "status": "failed", "error_type": type(exc).__name__,
+            "run_mode": pipeline.run_mode, "strict": args.strict,
+            "llm_failed_calls": pipeline.llm.failed_call_count,
+            "sciverse_failed_calls": pipeline.sciverse.failed_call_count if pipeline.sciverse else 0,
+        }, str)
+        raise
 
     def default_serializer(obj):
         if isinstance(obj, (set,)):
@@ -1578,7 +1619,9 @@ def main(argv=None):
 
     manifest = {
         "schema_version": "1.0",
-        "application_version": "5.3.0",
+        "application_version": "5.3.1",
+        "source_files_sha256": {name: hashlib.sha256((Path(project_dir) / name).read_bytes()).hexdigest()
+                                 for name in ("agents.py", "literature_data.py", "optimizer.py", "papers.py", "run.py", "sciverse_client.py")},
         "created_at": datetime.now().astimezone().isoformat(),
         "run_mode": results["pipeline_stats"]["run_mode"],
         "strict": args.strict,
