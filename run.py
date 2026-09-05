@@ -692,12 +692,12 @@ def generate_html_report(results, output_path):
     <h2>构效关系发现</h2>
   </div>
   <p style="font-size:13px;color:#555;margin-bottom:12px;">
-    基于LLM分析材料组成(Ga/In/Sn比例)与关键性能(电导率、表面张力、熔点等)的定量关系。
+    根据可追溯数值分析材料配比与物性的关联，分别呈现观测关联、跨来源对照和模型反事实。
     分析方法: {route_a.get("method", "unknown")} | 发现 {len(route_a.get("relationships", []))} 条构效关系,
     {len(route_a.get("trends", []))} 个趋势。
   </p>
   <div style="background:#e8f5e9;border-radius:6px;padding:8px 12px;margin:8px 0 12px;font-size:12px;color:#1b5e20;">
-    <strong>数据来源说明</strong>: 代理模型基于25个整理参考锚点构建，使用距离反比加权插值。
+    <strong>数据来源说明</strong>: 代理模型使用整理参考锚点与本批次通过证据和质量配比校验的新增物性观测，按属性进行距离反比加权插值；缺失性能不补造。
     书目信息已记录，但各数值及测试条件仍需回到原始来源逐项复核；本报告不宣称完成实时材料数据库交叉验证。
   </div>
 
@@ -755,6 +755,17 @@ def generate_html_report(results, output_path):
     <div style="font-size:11px;color:#1565c0;margin-top:3px;">&#128161; {trend.get("implication", "")}</div>
   </div>
 """)
+
+        ingestion = route_a.get('data_ingestion', {}).get('summary', {})
+        html_parts.append(f"<p>有效物性记录：{ingestion.get('accepted_properties', 0)}；新增代理物性观测：{ingestion.get('extracted_property_anchors', 0)}。</p>")
+        for key, heading in [('exploratory_comparisons', '跨来源配比—物性对照（非因果规律）'),
+                             ('exploratory_trends', '跨来源探索性拟合（条件未统一）'),
+                             ('model_trends', '模型反事实趋势（非实测验证）')]:
+            if route_a.get(key):
+                html_parts.append(f'<h3>{heading}</h3>')
+                for item in route_a[key]:
+                    html_parts.append('<pre style="white-space:pre-wrap;overflow-wrap:anywhere">' +
+                                      json.dumps(item, ensure_ascii=False, indent=2) + '</pre>')
 
         # Composition Optimization
         if route_a.get("composition_optimization"):
@@ -1619,9 +1630,9 @@ def main(argv=None):
 
     manifest = {
         "schema_version": "1.0",
-        "application_version": "5.3.1",
+        "application_version": "5.4.0",
         "source_files_sha256": {name: hashlib.sha256((Path(project_dir) / name).read_bytes()).hexdigest()
-                                 for name in ("agents.py", "literature_data.py", "optimizer.py", "papers.py", "run.py", "sciverse_client.py")},
+                                 for name in ("agents.py", "literature_data.py", "optimizer.py", "papers.py", "run.py", "sciverse_client.py", "route_a_data.py")},
         "created_at": datetime.now().astimezone().isoformat(),
         "run_mode": results["pipeline_stats"]["run_mode"],
         "strict": args.strict,

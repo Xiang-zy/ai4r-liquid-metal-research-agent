@@ -18,10 +18,10 @@ class BoundedGA(GeneticAlgorithm):
         return ga, indium, 100 - ga - indium
 
 
-def benchmark(seeds=(42, 123, 456, 789, 1024)):
+def benchmark(seeds=(42, 123, 456, 789, 1024), anchors=None):
     rows = []
     for seed in seeds:
-        surrogate = CompositionPropertySurrogate()
+        surrogate = CompositionPropertySurrogate(anchors=anchors)
         methods = {
             "random20": RandomSearch(surrogate, n_iterations=20, seed=seed),
             "ga20": BoundedGA(surrogate, pop_size=10, generations=1, seed=seed),

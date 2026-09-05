@@ -326,10 +326,10 @@ class EndToEndRegressionTests(unittest.TestCase):
 
     def test_manifest_records_zero_offline_calls_and_hashes(self):
         manifest = json.loads((self.output / "run_manifest.json").read_text())
-        self.assertEqual(manifest["application_version"], "5.3.1")
+        self.assertEqual(manifest["application_version"], "5.4.0")
         self.assertEqual(manifest["stats"]["llm_calls"], 0)
         self.assertEqual(manifest["stats"]["sciverse_calls"], 0)
-        self.assertEqual(len(manifest["source_files_sha256"]), 6)
+        self.assertEqual(len(manifest["source_files_sha256"]), 7)
 
     def test_gap_schema_and_computational_claim_guard(self):
         results = json.loads((self.output / "pipeline_results.json").read_text())

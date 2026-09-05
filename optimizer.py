@@ -21,6 +21,7 @@ import json
 import time
 from datetime import datetime
 from literature_data import get_anchor_list, cross_validate_against_reference_snapshot, get_reference_summary
+from route_a_data import prepare_records
 
 
 # ============================================================
@@ -34,14 +35,16 @@ class CompositionPropertySurrogate:
     书目来源组尚未逐项核验，也未证明彼此独立；不得称为已验证实测数据库。
     """
 
-    def __init__(self, knowledge_cards=None, include_extracted_anchors=False, anchors=None):
+    def __init__(self, knowledge_cards=None, include_extracted_anchors=True, anchors=None):
         self.data_points = []
-        if knowledge_cards and include_extracted_anchors:
-            self._build_from_cards(knowledge_cards)
+        self.ingestion = prepare_records(knowledge_cards or [])
+        if include_extracted_anchors:
+            self.data_points = self.ingestion['anchors']
 
         # v3.1: 使用待原始来源复核的整理参考锚点
         self.prior_knowledge = {}
         self._literature_anchors = list(anchors) if anchors is not None else get_anchor_list()
+        self._literature_anchors += self.data_points
 
         # 转换为兼容格式
         for anchor in self._literature_anchors:
@@ -50,32 +53,13 @@ class CompositionPropertySurrogate:
         # 预计算锚点列表
         self._anchors = list(self._anchors_with_refs())
 
-        # 添加文献数据点
-        for dp in self.data_points:
-            if "ga" in dp:
-                self._anchors.append({
-                    "ga": dp["ga"], "in": dp["in"], "sn": dp["sn"],
-                    "conductivity": dp.get("conductivity", 3.0e6),
-                    "melting_point": dp.get("melting_point", 20.0),
-                    "surface_tension": dp.get("surface_tension", 600.0),
-                    "density": dp.get("density", 6.3),
-                    "viscosity": dp.get("viscosity", 2.0e-3),
-                    "label": f"LLM-extracted ({dp.get('paper_id', '?')})",
-                    "reference": "LLM extracted from survey papers",
-                    "ref_code": "LLM",
-                    "data_type": "extracted",
-                })
 
     def _anchors_with_refs(self):
         """返回带文献引用的锚点列表"""
         return [
             {
                 "ga": a["ga"], "in": a["in"], "sn": a["sn"],
-                "conductivity": a["conductivity"],
-                "melting_point": a["melting_point"],
-                "surface_tension": a["surface_tension"],
-                "density": a["density"],
-                "viscosity": a["viscosity"],
+                **{key: a[key] for key in ('conductivity', 'melting_point', 'surface_tension', 'density', 'viscosity') if key in a},
                 "label": a.get("label", "?"),
                 "reference": a.get("reference", "?"),
                 "ref_code": a.get("ref_code", "?"),
@@ -85,45 +69,29 @@ class CompositionPropertySurrogate:
             for a in self._literature_anchors
         ]
 
-    def _build_from_cards(self, cards):
-        """从知识卡片提取组成-性能数据点"""
-        for card in cards:
-            point = {"paper_id": card["paper_id"], "source": "literature"}
-            for prop in card.get("properties", []):
-                pname = prop.get("property", "")
-                val = prop.get("value", 0)
-                if not isinstance(val, (int, float)):
-                    continue
-                if pname == "electrical conductivity":
-                    point["conductivity"] = val
-                elif pname == "melting point":
-                    point["melting_point"] = val
-                elif pname == "surface tension":
-                    point["surface_tension"] = val
-                elif pname == "density":
-                    point["density"] = val
-                elif pname == "viscosity":
-                    point["viscosity"] = val
-
-            materials = card.get("materials_identified", [])
-            text = " ".join(m.lower() for m in materials) + " " + card.get("title", "").lower()
-            if "egain" in text or "ga-in" in text:
-                point.update({"ga": 75.5, "in": 24.5, "sn": 0.0, "alloy": "EGaIn"})
-            elif "galinstan" in text:
-                point.update({"ga": 68.5, "in": 21.5, "sn": 10.0, "alloy": "Galinstan"})
-            elif "gallium" in text and "alloy" not in text:
-                point.update({"ga": 100.0, "in": 0.0, "sn": 0.0, "alloy": "Pure Ga"})
-            else:
-                continue
-
-            if "conductivity" in point or "melting_point" in point:
-                self.data_points.append(point)
 
     def predict(self, ga, in_pct, sn_pct):
         """预测给定组成的性能 (距离反比加权 + 非线性物理修正)"""
         total = ga + in_pct + sn_pct
         if total > 0:
             ga, in_pct, sn_pct = ga / total * 100, in_pct / total * 100, sn_pct / total * 100
+
+        if any(a.get('data_type') == 'extracted' for a in self._anchors):
+            result = {}
+            for prop in ('conductivity', 'melting_point', 'surface_tension', 'density', 'viscosity'):
+                available = [a for a in self._anchors if prop in a]
+                if not available:
+                    raise ValueError(f'No observations for {prop}')
+                distances = [math.sqrt((ga-a['ga'])**2 + (in_pct-a['in'])**2 + (sn_pct-a['sn'])**2) for a in available]
+                exact = [a[prop] for a,d in zip(available,distances) if d < .1]
+                if exact:
+                    result[prop] = sum(exact)/len(exact)
+                else:
+                    weights = [1/d**2 for d in distances]
+                    result[prop] = sum(w*a[prop] for w,a in zip(weights,available))/sum(weights)
+            nearest = min(math.sqrt((ga-a['ga'])**2+(in_pct-a['in'])**2+(sn_pct-a['sn'])**2) for a in self._anchors)
+            result['confidence'] = 1.0 if nearest < .1 else max(.1, 1-nearest/60)
+            return result
 
         # 距离反比加权插值
         weights = []
@@ -800,6 +768,8 @@ def run_evidence_robust_discovery(surrogate, resolution=2.5, risk_penalty=5.0, t
             "grid_candidates": len(records),
         },
         "source_groups": sources,
+        "extracted_property_anchors": sum(a.get('data_type') == 'extracted' for a in anchors),
+        "source_omission_counts": {source: sum(a.get('ref_code', 'unknown') == source for a in anchors) for source in sources},
         "pareto_front_size": len(pareto),
         "robust_candidates": pareto[:top_k],
         "best_risk_adjusted_candidate": robust_candidate,

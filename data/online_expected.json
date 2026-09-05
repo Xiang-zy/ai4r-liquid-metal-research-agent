@@ -1,0 +1,271 @@
+{
+  "candidate": {
+    "ga": 67.5,
+    "in": 22.5,
+    "sn": 10.0
+  },
+  "pareto_front_size": 52,
+  "extracted_property_anchors": 8,
+  "source_omission_counts": {
+    "Assael": 2,
+    "CRC": 3,
+    "Chieco": 2,
+    "Dickey": 1,
+    "Gallindo": 4,
+    "Koster": 2,
+    "Liu": 1,
+    "Lucas": 3,
+    "Morley": 2,
+    "Poirier": 2,
+    "Scharmann": 1,
+    "Zhang": 2,
+    "doc:1d697b0aa5b3d6bb4308119abdda1f19bdaadbe3bfd4e256bbfb43dc117d0337": 4,
+    "doc:ba6b67deb7f4b83dc0a5692491e90b964bf732122a3fd120d933b61e7b30521e": 3,
+    "doc:c8402b74686b3af4db1f368a467365d61cf309e64a7fcce5c00711c946238c34": 1
+  },
+  "counterfactual_tests": [
+    {
+      "change": "Sn -5.0 wt%, Ga/In按原比例守恒调整",
+      "from_composition": {
+        "ga": 67.5,
+        "in": 22.5,
+        "sn": 10.0
+      },
+      "to_composition": {
+        "ga": 71.25,
+        "in": 23.75,
+        "sn": 5.0
+      },
+      "predicted_delta": {
+        "melting_point_mean_C": 19.7178,
+        "melting_point_std_C": 2.0913,
+        "conductivity_mean_S_per_m": 2132.52,
+        "conductivity_std_S_per_m": 34274.01
+      },
+      "sign_consistency": {
+        "melting_point": 1.0,
+        "conductivity": 0.5333
+      },
+      "effect_to_spread_ratio": {
+        "melting_point": 9.4284,
+        "conductivity": 0.0622
+      },
+      "hypothesis_status": "source_sensitive_or_negligible",
+      "falsification_rule": "若新增独立来源或后续实验给出的效应方向与预测相反，则否证该候选假说。"
+    },
+    {
+      "change": "Sn +5.0 wt%, Ga/In按原比例守恒调整",
+      "from_composition": {
+        "ga": 67.5,
+        "in": 22.5,
+        "sn": 10.0
+      },
+      "to_composition": {
+        "ga": 63.75,
+        "in": 21.25,
+        "sn": 15.0
+      },
+      "predicted_delta": {
+        "melting_point_mean_C": 11.8734,
+        "melting_point_std_C": 2.7964,
+        "conductivity_mean_S_per_m": -267956.65,
+        "conductivity_std_S_per_m": 47916.17
+      },
+      "sign_consistency": {
+        "melting_point": 1.0,
+        "conductivity": 1.0
+      },
+      "effect_to_spread_ratio": {
+        "melting_point": 4.2459,
+        "conductivity": 5.5922
+      },
+      "hypothesis_status": "source_robust_candidate",
+      "falsification_rule": "若新增独立来源或后续实验给出的效应方向与预测相反，则否证该候选假说。"
+    }
+  ],
+  "prediction_changes": [
+    {
+      "composition": {
+        "ga": 68.5,
+        "in": 21.5,
+        "sn": 10
+      },
+      "baseline": {
+        "conductivity": 3100000.0,
+        "melting_point": -19.0,
+        "surface_tension": 535.0,
+        "density": 6.44,
+        "viscosity": 0.0024,
+        "confidence": 1.0
+      },
+      "updated": {
+        "conductivity": 3250000.0,
+        "melting_point": -19.0,
+        "surface_tension": 567.5,
+        "density": 6.44,
+        "viscosity": 0.00245,
+        "confidence": 1.0
+      }
+    },
+    {
+      "composition": {
+        "ga": 75,
+        "in": 25,
+        "sn": 0
+      },
+      "baseline": {
+        "conductivity": 3393139.3833201113,
+        "melting_point": 15.42910980371066,
+        "surface_tension": 623.1697174071525,
+        "density": 6.280216492715935,
+        "viscosity": 0.002005623508065135,
+        "confidence": 0.9882148869802242
+      },
+      "updated": {
+        "conductivity": 3393547.358479011,
+        "melting_point": 15.5,
+        "surface_tension": 623.1488295372234,
+        "density": 6.278503075882418,
+        "viscosity": 0.002007157562957262,
+        "confidence": 1.0
+      }
+    },
+    {
+      "composition": {
+        "ga": 77,
+        "in": 23,
+        "sn": 0
+      },
+      "baseline": {
+        "conductivity": 3375521.4653323246,
+        "melting_point": 14.896979153660922,
+        "surface_tension": 621.8391259516812,
+        "density": 6.265031106428141,
+        "viscosity": 0.0020231167212335682,
+        "confidence": 0.9646446609406726
+      },
+      "updated": {
+        "conductivity": 3400000.0,
+        "melting_point": 15.0,
+        "surface_tension": 624.0,
+        "density": 6.25,
+        "viscosity": 0.0020313161631909044,
+        "confidence": 1.0
+      }
+    }
+  ],
+  "exploratory_comparisons": [
+    {
+      "property": "electrical conductivity",
+      "unit": "S/m",
+      "observations": [
+        {
+          "composition": {
+            "ga": 68.5,
+            "in": 21.5,
+            "sn": 10
+          },
+          "value": 3400000.0,
+          "source_ids": [
+            "doc:ba6b67deb7f4b83dc0a5692491e90b964bf732122a3fd120d933b61e7b30521e"
+          ],
+          "conditions": [
+            ""
+          ]
+        },
+        {
+          "composition": {
+            "ga": 77,
+            "in": 23,
+            "sn": 0
+          },
+          "value": 3400000.0,
+          "source_ids": [
+            "doc:1d697b0aa5b3d6bb4308119abdda1f19bdaadbe3bfd4e256bbfb43dc117d0337"
+          ],
+          "conditions": [
+            ""
+          ]
+        }
+      ],
+      "claim_level": "cross_source_descriptive_comparison",
+      "description": "跨来源配比—物性对照；不控制测试条件，不估计单元素因果效应。"
+    },
+    {
+      "property": "melting point",
+      "unit": "C",
+      "observations": [
+        {
+          "composition": {
+            "ga": 75,
+            "in": 25,
+            "sn": 0
+          },
+          "value": 15.5,
+          "source_ids": [
+            "doc:c8402b74686b3af4db1f368a467365d61cf309e64a7fcce5c00711c946238c34"
+          ],
+          "conditions": [
+            ""
+          ]
+        },
+        {
+          "composition": {
+            "ga": 77,
+            "in": 23,
+            "sn": 0
+          },
+          "value": 15.0,
+          "source_ids": [
+            "doc:1d697b0aa5b3d6bb4308119abdda1f19bdaadbe3bfd4e256bbfb43dc117d0337"
+          ],
+          "conditions": [
+            ""
+          ]
+        }
+      ],
+      "claim_level": "cross_source_descriptive_comparison",
+      "description": "跨来源配比—物性对照；不控制测试条件，不估计单元素因果效应。"
+    },
+    {
+      "property": "surface tension",
+      "unit": "mN/m",
+      "observations": [
+        {
+          "composition": {
+            "ga": 68.5,
+            "in": 21.5,
+            "sn": 10
+          },
+          "value": 600.0,
+          "source_ids": [
+            "doc:ba6b67deb7f4b83dc0a5692491e90b964bf732122a3fd120d933b61e7b30521e"
+          ],
+          "conditions": [
+            ""
+          ]
+        },
+        {
+          "composition": {
+            "ga": 77,
+            "in": 23,
+            "sn": 0
+          },
+          "value": 624.0,
+          "source_ids": [
+            "doc:1d697b0aa5b3d6bb4308119abdda1f19bdaadbe3bfd4e256bbfb43dc117d0337"
+          ],
+          "conditions": [
+            ""
+          ]
+        }
+      ],
+      "claim_level": "cross_source_descriptive_comparison",
+      "description": "跨来源配比—物性对照；不控制测试条件，不估计单元素因果效应。"
+    }
+  ],
+  "observed_relationships": [],
+  "observed_trends": [],
+  "numeric_input_sha256": "abe1a65ae7a6eb23593f67c400a2fec633c1b5697a5e54f1a4e5be58ab854b77",
+  "baseline_input_sha256": "5878aa49bacbbda892e8c9f0a400c4ce43642545faef9db0d796e529e7a13c61"
+}
